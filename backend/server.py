@@ -5,7 +5,20 @@ import concurrent.futures
 from detection.cv_capture import Capture
 from aiohttp import web
 import concurrent.futures
+from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
 
+
+def VideoStream(VideoStreamTrack):
+    def __init__(self, capture):
+        super.__init__()  # Initialize VideoStreamTrack
+        self._capture = capture
+    
+    def recv(self):
+        return self._capture.start_capture()
+
+    def stop(self):
+        self.capture.cleanUp()  # Clean up resources when done
+    
 class Server():
 
     app = web.Application()
@@ -30,6 +43,21 @@ class Server():
 
     def __init__(self, camera) -> None:
         Server._camera = camera
+
+    # testing webRTC with only 1 peer
+    @staticmethod
+    async def offer(sdp_peer):
+
+        pc = RTCPeerConnection()
+        pc.addTrack(VideoStream(Server._camera))
+
+        offer = await pc.createOffer()
+        await pc.setLocalDescription(offer)
+        
+        remote_session = RTCSessionDescription(sdp=sdp_peer, type="answer")
+        await pc.setRemoteDescription(remote_session)
+        return pc.localDescription.sdp
+        
     
     @staticmethod
     async def capture_and_send():
@@ -130,10 +158,12 @@ class Server():
 
         await Server.handle_disconnect_stream_stop(sid)
 
-    # Factory app init to start backround process
-    async def init_app(self):
-        Server.sio.start_background_task(Server.capture_and_send)
-        return Server.app
+
+    @sio.on('negotiate_sdp')
+    async def end_stream(sid, data):
+        print(f'Negotiating SDP for stream')
+        sdp_offer = Server.offer()
+        await Server.sio.emit('sdp_token', sdp_offer, to=sid)
 
     # Add route to CORS
     status_route = app.router.add_get('/status', status)

@@ -153,124 +153,122 @@ class Capture():
 
         cached_frame = None
 
-        while not self.end_stream:
+        succ, frame = self.cap.read()
+        if not succ:
+            print("frame not returned - exiting")
+            raise RuntimeError("Failed to read frame from source")
 
-            succ, frame = self.cap.read()
-            if not succ:
-                print("frame not returned - exiting")
-                break  # Break the loop if no frame is returned
+        result = self.model(frame, agnostic_nms=True, verbose=False)[0]
+        detections = sv.Detections.from_ultralytics(result)
+        labels = []
 
-            result = self.model(frame, agnostic_nms=True, verbose=False)[0]
-            detections = sv.Detections.from_ultralytics(result)
-            labels = []
+        if(faces_post_process_future):
+            faces_post_process_future.result() # We need this suprocess to block until completion to avoid race conditions on the next frame processing
 
-            if(faces_post_process_future):
-                faces_post_process_future.result() # We need this suprocess to block until completion to avoid race conditions on the next frame processing
+        face_found = False
 
-            face_found = False
+        for xyxy, _, _, class_id, _, _ in detections:
+            entity_type = self.model.names[class_id]
 
-            for xyxy, _, _, class_id, _, _ in detections:
-                entity_type = self.model.names[class_id]
+            res = None
+            if entity_type == "face":
+                
+                res = self.faces_tracker.re_index_faces(xyxy)
 
-                res = None
-                if entity_type == "face":
+                auth_id = Capture.get_auth_id()
+
+                if(auth_id is not None and res[0] and res[1] == auth_id):
                     
-                    res = self.faces_tracker.re_index_faces(xyxy)
+                    face_found = True
+                    if not self.auth_timeout_timer:
+                        print(f"~~~~~~~~ Begining Authentication procedure for the Person with Face ID {auth_id}")
+                        self.face_mesh.gen_blink_sequence()
 
-                    auth_id = Capture.get_auth_id()
+                        self.auth_timeout_timer = threading.Timer(interval=5.0, function=self.face_mesh.start_timeout)
+                        self.auth_timeout_timer.start()
 
-                    if(auth_id is not None and res[0] and res[1] == auth_id):
-                        
-                        face_found = True
-                        if not self.auth_timeout_timer:
-                            print(f"~~~~~~~~ Begining Authentication procedure for the Person with Face ID {auth_id}")
-                            self.face_mesh.gen_blink_sequence()
+                    
+                    target_face_img = frame[int(xyxy[1]):int(xyxy[3]), int(xyxy[0]):int(xyxy[2])] # only processing the section of the frame which is the person's face
+                    face_mesh_future = self.thread_pool.submit(self.face_mesh.process_frame_face_mesh, target_face_img, (xyxy[0], xyxy[1]))
 
-                            self.auth_timeout_timer = threading.Timer(interval=5.0, function=self.face_mesh.start_timeout)
-                            self.auth_timeout_timer.start()
+                if(not res[0]):
+                    new_face = Face(xyxy)
+                    self.faces_tracker.new_faces[new_face.face_id] = new_face
 
-                        
-                        target_face_img = frame[int(xyxy[1]):int(xyxy[3]), int(xyxy[0]):int(xyxy[2])] # only processing the section of the frame which is the person's face
-                        face_mesh_future = self.thread_pool.submit(self.face_mesh.process_frame_face_mesh, target_face_img, (xyxy[0], xyxy[1]))
+            labels.append(f"{entity_type} ID:{res[1] if res else -1}")
 
-                    if(not res[0]):
-                        new_face = Face(xyxy)
-                        self.faces_tracker.new_faces[new_face.face_id] = new_face
+        faces_post_process_future = self.thread_pool.submit(self.save_faces_post_processing)
 
-                labels.append(f"{entity_type} ID:{res[1] if res else -1}")
+        if not face_found and self.auth_timeout_timer:
+            self.kill_auth_process("target_lost", "Target Face was lost - please move back into frame, hold still and re-authenticate")
+        
+        # time_red = time.time()
 
-            faces_post_process_future = self.thread_pool.submit(self.save_faces_post_processing)
+        # obstacles = [
+        #     Obstacle(self.model.names[class_id],
+        #              confidence, xyxy, self.annotators.zone_polygon, time_red)
+        #     for xyxy, _, confidence, class_id, _, _ in detections
+        # ]
 
-            if not face_found and self.auth_timeout_timer:
-                self.kill_auth_process("target_lost", "Target Face was lost - please move back into frame, hold still and re-authenticate")
-            
-            # time_red = time.time()
+        # render only objects that are still on screen
+        # time_now = time.time()
+        # obstacles_to_speak = [
+        #     obstacle for obstacle in obstacles if obstacle is not None and time_now - obstacle.time_registered < TIME_OUT]
+        # # submit task to thread pool
+        # self.executor.submit(self._speak_messages, obstacles_to_speak)
 
-            # obstacles = [
-            #     Obstacle(self.model.names[class_id],
-            #              confidence, xyxy, self.annotators.zone_polygon, time_red)
-            #     for xyxy, _, confidence, class_id, _, _ in detections
-            # ]
+        # if (Capture._speech_thread == None or not Capture._speech_thread.is_alive()):
+        #     obstacles_to_speak = [obstacle for obstacle in obstacles if obstacle != None and time.time(
+        #     ) - obstacle.time_registered < Capture._TIME_OUT]
+        #     Capture._speech_thread = threading.Thread(
+        #         target=self._speak_messages, args=(obstacles_to_speak,))
+        #     Capture._speech_thread.start()
 
-            # render only objects that are still on screen
-            # time_now = time.time()
-            # obstacles_to_speak = [
-            #     obstacle for obstacle in obstacles if obstacle is not None and time_now - obstacle.time_registered < TIME_OUT]
-            # # submit task to thread pool
-            # self.executor.submit(self._speak_messages, obstacles_to_speak)
+        frame = self.annotators.bb_annotator.annotate(
+            scene=frame,
+            detections=detections
+        )
 
-            # if (Capture._speech_thread == None or not Capture._speech_thread.is_alive()):
-            #     obstacles_to_speak = [obstacle for obstacle in obstacles if obstacle != None and time.time(
-            #     ) - obstacle.time_registered < Capture._TIME_OUT]
-            #     Capture._speech_thread = threading.Thread(
-            #         target=self._speak_messages, args=(obstacles_to_speak,))
-            #     Capture._speech_thread.start()
+        frame = self.annotators.label_annotator.annotate(
+            scene=frame,
+            detections=detections,
+            labels=labels
+        )
 
-            frame = self.annotators.bb_annotator.annotate(
-                scene=frame,
-                detections=detections
-            )
+        self.annotators.zone.trigger(detections=detections)            
+        # frame = self.annotators.zone_annotator.annotate(scene=frame)
 
-            frame = self.annotators.label_annotator.annotate(
-                scene=frame,
-                detections=detections,
-                labels=labels
-            )
+        if(face_mesh_future):
+            cached_frame = frame.copy()
+            coords_to_draw, auth_finished = face_mesh_future.result()
+            self.face_mesh.draw(frame, coords_to_draw)
 
-            self.annotators.zone.trigger(detections=detections)            
-            # frame = self.annotators.zone_annotator.annotate(scene=frame)
+            # TODO: Make sure this does not cause the capture thread to block - stress test it
+            if auth_finished or not face_found:
+                frame = cached_frame
+                Capture.update_auth_target(None)
 
-            if(face_mesh_future):
-                cached_frame = frame.copy()
-                coords_to_draw, auth_finished = face_mesh_future.result()
-                self.face_mesh.draw(frame, coords_to_draw)
+            for _, face in self.faces_tracker.face_dict.items():
+                x = int(face.face_center_params[0])
+                y = int(face.face_center_params[1])
+                cv2.circle(frame, (x,y), radius=5, color=(0, 0, 255), thickness=4) #red
 
-                # TODO: Make sure this does not cause the capture thread to block - stress test it
-                if auth_finished or not face_found:
-                    frame = cached_frame
-                    Capture.update_auth_target(None)
+                new_center = face.predict()
+                new_x = int(new_center[0])
+                new_y = int(new_center[1])
 
-                for _, face in self.faces_tracker.face_dict.items():
-                    x = int(face.face_center_params[0])
-                    y = int(face.face_center_params[1])
-                    cv2.circle(frame, (x,y), radius=5, color=(0, 0, 255), thickness=4) #red
-
-                    new_center = face.predict()
-                    new_x = int(new_center[0])
-                    new_y = int(new_center[1])
-
-                    cv2.circle(frame, (new_x, new_y), radius=5, color=(255, 0, 0), thickness=4) #blue
+                cv2.circle(frame, (new_x, new_y), radius=5, color=(255, 0, 0), thickness=4) #blue
 
 
-            yield self.encode_image(frame)
+        return self.encode_image(frame)
 
-            # cv2.imshow("Sight Sence - Frame", frame)
+        # cv2.imshow("Sight Sence - Frame", frame)
 
-            # if cv2.waitKey(1) & 0xFF == ord('q'):
-            #     break
+        # if cv2.waitKey(1) & 0xFF == ord('q'):
+        #     break
 
-            
-
+    
+    def cleanUp(self):
         # Release the capture object and close all windows
         self.cap.release()
         cv2.destroyAllWindows()

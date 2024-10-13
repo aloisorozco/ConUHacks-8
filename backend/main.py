@@ -28,4 +28,4 @@ if __name__ == "__main__":
     sio = server.sio
 
     print(f' ------------- Staring Server ------------- PORT: {PORT}')
-    web.run_app(server.init_app(), host=IP, port=PORT)
+    web.run_app(server.app, host=IP, port=PORT)

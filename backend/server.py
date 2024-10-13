@@ -26,6 +26,8 @@ class Server():
 
     sio.attach(app)
 
+    pc = None
+
     # Set up CORS for aiohttp
     cors = aiohttp_cors.setup(app, defaults={
         "*": aiohttp_cors.ResourceOptions(
@@ -46,25 +48,16 @@ class Server():
 
     # testing webRTC with only 1 peer
     @staticmethod
-    async def offer(sdp_peer):
+    async def offer():
 
-        pc = RTCPeerConnection()
-        pc.addTrack(VideoStream(Server._camera))
+        Server.pc = RTCPeerConnection()
+        Server.pc.addTrack(VideoStream(Server._camera))
 
-        offer = await pc.createOffer()
-        await pc.setLocalDescription(offer)
+        offer = await Server.pc.createOffer()
+        await Server.pc.setLocalDescription(offer)
         
-        remote_session = RTCSessionDescription(sdp=sdp_peer, type="answer")
-        await pc.setRemoteDescription(remote_session)
-        return pc.localDescription.sdp
+        return Server.pc.localDescription.sdp
         
-    
-    @staticmethod
-    async def capture_and_send():
-        for encoded_frame in Server._camera.start_capture():
-            await Server.sio.emit('frame', encoded_frame, room='super_secret_security_camera_broadcast')
-            await Server.sio.sleep(0.01)
-
     @staticmethod
     async def lock_in_face(id):
         Capture.update_auth_target(id)
@@ -128,13 +121,6 @@ class Server():
         Server._auth_status["sid"] = sid
         Server._auth_status["status"] = "finished"
         Server._mutex.release()
-            
-
-    @sio.on('join_stream')
-    async def join_stream(sid):
-        print(f'----- {sid} joined security broadcast stream -----')
-        await Server.sio.enter_room(sid, 'super_secret_security_camera_broadcast')
-        await Server.sio.emit('join_stream_confirmation', 200, to=sid)
 
 
     @sio.on('connect')
@@ -159,11 +145,19 @@ class Server():
         await Server.handle_disconnect_stream_stop(sid)
 
 
-    @sio.on('negotiate_sdp')
-    async def end_stream(sid, data):
-        print(f'Negotiating SDP for stream')
+    @sio.on('initiate_sdp')
+    async def end_stream(sid):
+        print(f'intiation SDP for stream')
         sdp_offer = Server.offer()
         await Server.sio.emit('sdp_token', sdp_offer, to=sid)
+
+
+    @sio.on('resolve_sdp')
+    async def end_stream(sid, sdp_answ):
+        print(f'resolve SDP for stream')
+        Server.pc.setRemoteDescription(sdp_answ)
+        await Server.sio.emit('rtc_success', "rtc setup all good yay!", to=sid)
+
 
     # Add route to CORS
     status_route = app.router.add_get('/status', status)

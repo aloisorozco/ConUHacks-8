@@ -67,11 +67,19 @@ async function endStream(socket) {
 
 }
 
-async function joinStream(socket) {
+async function initiateSDP(socket, ) {
 
     return new Promise((resolve, reject) => {
-        socket.emit('join_stream')
-        socket.on('join_stream_confirmation', (data) => { resolve(data) })
+        socket.emit('negotiate_sdp')
+        socket.on('sdp_token', (sdp) => { resolve({sdp_token: sdp}) })
+    })
+}
+
+async function resolveSDP(socket, spd_answer) {
+
+    return new Promise((resolve, reject) => {
+        socket.emit('resolve_sdp', spd_answer)
+        socket.on('rtc_success', (data) => { resolve(data)})
     })
 }
 
@@ -142,24 +150,29 @@ function SettingsScreen(props) {
             setStart(true)
             setAuthAllowed(true)
 
-            let res = null
-            await joinStream(webSocket).then((data) => {
-                res = data
+            let sdp_offer = null
+            await initiateSDP(webSocket, rc.localDescription).then((data) => {
+                sdp_offer = data.sdp_token
             })
 
-            if (res == 200) {
+            let rc = new RTCPeerConnection()
 
-                webSocket.on("frame", (data) => {
-                    console.log('frame recieved')
+            rc.ondatachannel(e =>{
+                rc.dc = e.channel
+                rc.dc.onmessage = e => {
+                    console.log("frame recieved")
                     props.sendData({
-                        frame: data,
+                        frame: e.data,
                         start: true,
                     })
-                })
+                }
+                rc.dc.onopen = e => {console.log("Connection Open'")}
+            })
 
-            } else {
-                console.log("Cant connect to serwer - I am going to break my monitaur I swaer")
-            }
+            rc.setRemoteDescription(sdp_offer)
+            rc.createAnswer().then(a => rc.setLocalDescription(a));
+
+            await resolveSDP(webSocket, rc.localDescription.sdp).then((data) => console.log(data))
 
         }else{
             Swal.fire({
